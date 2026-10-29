@@ -1,0 +1,1061 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Realtime Console · 语音对话</title>
+<link rel="stylesheet" href="https://unpkg.com/antd@5.21.6/dist/reset.css">
+<script src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/dayjs@1.11.13/dayjs.min.js"></script>
+<script src="https://unpkg.com/antd@5.21.6/dist/antd.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<style>
+  :root {
+    --base: #efefef;
+    --card: #fafafa;
+    --line: #e0e0e0;
+    --text: #1f2329;
+    --sub: #6b7280;
+    --accent: #2563eb;
+    --accent-green: #16a34a;
+    --accent-red: #dc2626;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body, #root { height: 100%; }
+  body {
+    font-family: "SF Mono", "Menlo", "Consolas", "PingFang SC", monospace;
+    font-size: 0.9rem;
+    background: var(--base);
+    color: var(--text);
+    overflow: hidden;
+  }
+
+  .nav {
+    height: 64px; display: flex; align-items: center; gap: 12px;
+    padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--base);
+  }
+  .nav h1 { font-size: 1rem; font-weight: 700; letter-spacing: 0.02em; }
+  .nav .spacer { flex: 1; }
+
+  .main { position: absolute; top: 64px; left: 0; right: 380px; bottom: 0; display: flex; flex-direction: column; }
+  .side { position: absolute; top: 64px; width: 380px; right: 0; bottom: 0;
+          border-left: 1px solid var(--line); overflow-y: auto; padding: 16px;
+          display: flex; flex-direction: column; gap: 16px; background: var(--base); }
+
+  .pane-tabs { padding: 12px 16px 0; }
+  .pane-body { flex: 1; overflow-y: auto; padding: 12px 16px; }
+
+  /* ---- 对话气泡 ---- */
+  .bubble { max-width: 76%; margin-bottom: 12px; padding: 10px 14px; border-radius: 12px;
+            line-height: 1.7; white-space: pre-wrap; word-break: break-word; font-size: 0.85rem; }
+  .bubble.user { margin-left: auto; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+  .bubble.assistant { background: #fff; border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .bubble .who { display: block; font-size: 0.7rem; opacity: .65; margin-bottom: 4px; letter-spacing: 0.05em; }
+  .bubble.sysnote { margin: 0 auto 12px; max-width: 92%; font-size: 0.75rem; color: var(--sub);
+                    background: #fff; border: 1px dashed #c9ced6; border-radius: 8px; padding: 4px 12px; text-align: center; }
+  .bubble.sysnote.err { color: var(--accent-red); border-color: #f3b4b4; }
+
+  /* ---- 事件流（仿官方 console）---- */
+  .event-card { display: flex; flex-direction: column; gap: 6px; padding: 8px;
+                border-radius: 8px; background: var(--card); border: 1px solid #ececec; margin-bottom: 6px; }
+  .event-head { display: flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .event-head .dir { display: inline-flex; align-items: center; }
+  .event-head .meta { font-size: 0.75rem; color: var(--sub); }
+  .event-head .meta b { color: var(--text); font-weight: 600; }
+  .event-head .evt-id { margin-left: auto; font-size: 0.7rem; color: #a3a3a3; }
+  .event-json { background: #e8e8e8; border-radius: 6px; padding: 8px; overflow-x: auto; }
+  .event-json pre { font-size: 0.72rem; line-height: 1.5; }
+  .event-empty { color: var(--sub); padding: 16px 4px; font-size: 0.8rem; }
+
+  /* ---- 底部控制条 ---- */
+  .controls { border-top: 1px solid var(--line); padding: 14px 16px; display: flex;
+              align-items: center; gap: 12px; background: var(--base); height: 96px; }
+  .pill-input { flex: 1; border: 1px solid var(--line); border-radius: 999px;
+                padding: 12px 20px; font-family: inherit; font-size: 0.85rem; outline: none; background: #fff; }
+  .pill-input:focus { border-color: var(--accent); }
+  .pill-btn { display: inline-flex; align-items: center; gap: 6px; border: none; cursor: pointer;
+              border-radius: 999px; padding: 12px 20px; font-family: inherit; font-size: 0.82rem;
+              color: #fff; background: #3f3f46; transition: opacity .15s; white-space: nowrap; }
+  .pill-btn:hover { opacity: .88; }
+  .pill-btn.blue { background: var(--accent); }
+  .pill-btn.red { background: var(--accent-red); }
+  .pill-btn:disabled { background: #c4c8d0; cursor: not-allowed; }
+  .round-btn { width: 56px; height: 56px; border-radius: 50%; border: none; cursor: pointer;
+               display: flex; align-items: center; justify-content: center; color: #fff;
+               background: var(--accent-red); flex-shrink: 0; transition: opacity .15s; }
+  .round-btn:hover { opacity: .9; }
+  .round-btn.on { background: #3f3f46; }
+  .round-btn:disabled { background: #c4c8d0; cursor: not-allowed; }
+
+  /* ---- 侧栏面板 ---- */
+  .panel { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .panel h3 { font-size: 0.8rem; color: var(--sub); font-weight: 600; letter-spacing: 0.08em;
+              margin-bottom: 10px; display: flex; align-items: center; gap: 6px; }
+  .kv { display: flex; justify-content: space-between; font-size: 0.8rem; padding: 4px 0; }
+  .kv .k { color: var(--sub); }
+  .kv .v { font-weight: 600; max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .stage-strip { display: flex; gap: 6px; margin-bottom: 12px; justify-content: center; }
+  .stage { font-size: 0.72rem; padding: 3px 12px; border-radius: 999px; color: var(--sub);
+           background: #fff; border: 1px solid var(--line); display: inline-flex; align-items: center; gap: 5px; }
+  .stage.on { color: var(--accent); border-color: var(--accent); background: #e8efff; font-weight: 600; }
+
+  .usage-mini { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .usage-mini .cell { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+  .usage-mini .num { font-size: 1.05rem; font-weight: 700; }
+  .usage-mini .lbl { font-size: 0.7rem; color: var(--sub); }
+
+  .blink { animation: blink 1.1s infinite; }
+  @keyframes blink { 50% { opacity: .3; } }
+  .cursor-blink::after { content: "▍"; animation: blink 1s infinite; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+// ---------- 内联 SVG 图标（feather 风格） ----------
+window.Icon = {
+  Mic: (p) => (
+    <svg width={(p && p.size) || 24} height={(p && p.size) || 24} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/>
+      <line x1="8" y1="23" x2="16" y2="23"/>
+    </svg>
+  ),
+  MicOff: (p) => (
+    <svg width={(p && p.size) || 24} height={(p && p.size) || 24} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="1" y1="1" x2="23" y2="23"/>
+      <path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><path d="M15 9.34V4a3 3 0 0 0-5.94-.6"/>
+      <path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"/>
+      <line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/>
+    </svg>
+  ),
+  Stop: (p) => (
+    <svg width={(p && p.size) || 24} height={(p && p.size) || 24} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="5" y="5" width="14" height="14" rx="2"/>
+    </svg>
+  ),
+  Send: (p) => (
+    <svg width={(p && p.size) || 16} height={(p && p.size) || 16} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/>
+    </svg>
+  ),
+  CloudOn: (p) => (
+    <svg width={(p && p.size) || 16} height={(p && p.size) || 16} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+      <polygon points="13 11 11 13 15 13 13 11" fill="currentColor" stroke="none"/>
+    </svg>
+  ),
+  CloudOff: (p) => (
+    <svg width={(p && p.size) || 16} height={(p && p.size) || 16} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+      <line x1="1" y1="1" x2="23" y2="23" transform="translate(0,0)"/>
+    </svg>
+  ),
+  ArrowUp: (p) => (
+    <svg width={(p && p.size) || 14} height={(p && p.size) || 14} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/>
+    </svg>
+  ),
+  ArrowDown: (p) => (
+    <svg width={(p && p.size) || 14} height={(p && p.size) || 14} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/>
+    </svg>
+  ),
+  Ear: (p) => (
+    <svg width={(p && p.size) || 12} height={(p && p.size) || 12} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17 10a5 5 0 0 0-10 0"/><path d="M7 10v4a5 5 0 0 0 10 0v-4"/>
+      <path d="M12 14a2 2 0 0 0 2-2"/><path d="M9 20a3 3 0 0 1 0-6"/>
+    </svg>
+  ),
+  Brain: (p) => (
+    <svg width={(p && p.size) || 12} height={(p && p.size) || 12} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 4a3 3 0 0 0-3 3v1a3 3 0 0 0-3 3 3 3 0 0 0 1 5.22A3 3 0 0 0 9 20a3 3 0 0 0 3-2"/>
+      <path d="M12 4a3 3 0 0 1 3 3v1a3 3 0 0 1 3 3 3 3 0 0 1-1 5.22A3 3 0 0 1 15 20a3 3 0 0 1-3-2"/>
+      <path d="M12 4v14"/>
+    </svg>
+  ),
+  Speaker: (p) => (
+    <svg width={(p && p.size) || 12} height={(p && p.size) || 12} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
+      <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
+    </svg>
+  ),
+  Settings: (p) => (
+    <svg width={(p && p.size) || 16} height={(p && p.size) || 16} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="3"/>
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+    </svg>
+  ),
+  Chart: (p) => (
+    <svg width={(p && p.size) || 16} height={(p && p.size) || 16} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="12" y1="20" x2="12" y2="10"/><line x1="18" y1="20" x2="18" y2="4"/>
+      <line x1="6" y1="20" x2="6" y2="16"/>
+    </svg>
+  ),
+  Bolt: (p) => (
+    <svg width={(p && p.size) || 16} height={(p && p.size) || 16} viewBox="0 0 24 24"
+         fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+    </svg>
+  ),
+};
+</script>
+
+<script>
+const WORKLET_SRC = `
+class RecProc extends AudioWorkletProcessor {
+  process(inputs) {
+    const ch = inputs[0] && inputs[0][0];
+    if (ch) this.port.postMessage(ch.slice(0));
+    return true;
+  }
+}
+registerProcessor('rec-proc', RecProc);
+`;
+
+function floatTo16(f32) {
+  const out = new Int16Array(f32.length);
+  for (let i = 0; i < f32.length; i++) {
+    const s = Math.max(-1, Math.min(1, f32[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+  }
+  return out;
+}
+function b64FromInt16(i16) {
+  const u8 = new Uint8Array(i16.buffer, i16.byteOffset, i16.byteLength);
+  let bin = "";
+  for (let i = 0; i < u8.length; i += 0x8000) {
+    bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  }
+  return btoa(bin);
+}
+function int16FromB64(b64) {
+  const bin = atob(b64);
+  const u8 = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+  return new Int16Array(u8.buffer);
+}
+
+class AudioEngine {
+  constructor() {
+    this.ctx = null; this.worklet = null; this.stream = null; this.source = null;
+    this.sendBuf = new Int16Array(0); this.sendTimer = null;
+    this.onSend = null;
+    this.playSources = []; this.nextPlayTime = 0; this.speaking = false;
+    this.onSpeakingChange = null;
+  }
+  ensureCtx() {
+    if (!this.ctx) this.ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+    if (this.ctx.state === "suspended") this.ctx.resume();
+    return this.ctx;
+  }
+  async startMic() {
+    const ctx = this.ensureCtx();
+    if (!this.worklet) {
+      const url = URL.createObjectURL(new Blob([WORKLET_SRC], { type: "application/javascript" }));
+      await ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      this.worklet = new AudioWorkletNode(ctx, "rec-proc");
+      this.worklet.port.onmessage = (e) => {
+        const pcm = floatTo16(e.data);
+        const merged = new Int16Array(this.sendBuf.length + pcm.length);
+        merged.set(this.sendBuf); merged.set(pcm, this.sendBuf.length);
+        this.sendBuf = merged;
+      };
+    }
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    this.source = ctx.createMediaStreamSource(this.stream);
+    this.source.connect(this.worklet);
+    this.sendTimer = setInterval(() => this.flush(), 100);
+  }
+  flush() {
+    if (!this.sendBuf.length) return;
+    if (this.onSend) this.onSend(b64FromInt16(this.sendBuf));
+    this.sendBuf = new Int16Array(0);
+  }
+  stopMic() {
+    if (this.sendTimer) { clearInterval(this.sendTimer); this.sendTimer = null; }
+    if (this.stream) { this.stream.getTracks().forEach(t => t.stop()); this.stream = null; }
+    if (this.source) { try { this.source.disconnect(); } catch (e) {} this.source = null; }
+    this.sendBuf = new Int16Array(0);
+  }
+  play(i16) {
+    const ctx = this.ensureCtx();
+    const f32 = new Float32Array(i16.length);
+    for (let i = 0; i < i16.length; i++) f32[i] = i16[i] / 32768;
+    const buf = ctx.createBuffer(1, f32.length, 24000);
+    buf.copyToChannel(f32, 0);
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    const now = ctx.currentTime;
+    if (this.nextPlayTime < now + 0.05) this.nextPlayTime = now + 0.05;
+    src.start(this.nextPlayTime);
+    this.nextPlayTime += buf.duration;
+    this.playSources.push(src);
+    this._setSpeaking(true);
+    src.onended = () => {
+      this.playSources = this.playSources.filter(s => s !== src);
+      if (!this.playSources.length) this._setSpeaking(false);
+    };
+  }
+  stopPlayback() {
+    this.playSources.forEach(s => { try { s.stop(); } catch (e) {} });
+    this.playSources = [];
+    this.nextPlayTime = 0;
+    this._setSpeaking(false);
+  }
+  _setSpeaking(v) {
+    if (this.speaking !== v) {
+      this.speaking = v;
+      if (this.onSpeakingChange) this.onSpeakingChange(v);
+    }
+  }
+}
+</script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useRef, useEffect, useCallback } = React;
+const { ConfigProvider, Modal, Form, Input, Select, Tabs, Tooltip, App: AntApp, Typography } = antd;
+const Icon = window.Icon;
+const VOICES = ["alloy", "echo", "shimmer", "ash", "ballad", "coral", "sage", "verse", "marin", "cedar"];
+
+// ---------- 设置弹窗 ----------
+function SettingsModal({ open, config, onClose, onSave }) {
+  const [form] = Form.useForm();
+  useEffect(() => {
+    if (open) {
+      form.setFieldsValue({
+        base: config.base, model: config.model, text_model: config.text_model,
+        voice: config.voice, sys_prompt: config.sys_prompt, key: ""
+      });
+    }
+  }, [open, config]);
+  return (
+    <Modal title="接口设置" open={open} onCancel={onClose} okText="保存" cancelText="取消"
+      onOk={() => form.validateFields().then(v => { form.resetFields(); onSave(v); })}>
+      <Form form={form} layout="vertical">
+        <Form.Item name="base" label="中转平台地址" rules={[{ required: true, message: "必填，如 https://api.example.com" }]}>
+          <Input placeholder="https://api.example.com" />
+        </Form.Item>
+        <Form.Item name="key" label="API Key（留空表示沿用已保存的 Key）">
+          <Input.Password placeholder={config.key || "sk-..."} autoComplete="new-password" />
+        </Form.Item>
+        <Form.Item name="model" label="Realtime 模型" rules={[{ required: true }]}>
+          <Input placeholder="gpt-realtime" />
+        </Form.Item>
+        <Form.Item name="text_model" label="文本模型（Responses WS）">
+          <Input placeholder="gpt-5.2 / claude-sonnet-4-5 等" />
+        </Form.Item>
+        <Form.Item name="voice" label="音色" initialValue="alloy">
+          <Select options={VOICES.map(v => ({ value: v, label: v }))} />
+        </Form.Item>
+        <Form.Item name="sys_prompt" label="系统提示词（人设）">
+          <Input.TextArea rows={2} placeholder="你是一个友好的语音助手，回答简短口语化。" />
+        </Form.Item>
+      </Form>
+    </Modal>
+  );
+}
+
+// ---------- 事件卡片（仿官方 EventLog） ----------
+function EventCard({ ev }) {
+  const [open, setOpen] = useState(false);
+  const isClient = ev._dir === "client";
+  return (
+    <div className="event-card">
+      <div className="event-head" onClick={() => setOpen(!open)}>
+        <span className="dir" style={{ color: isClient ? "#3b82f6" : "#16a34a" }}>
+          {isClient ? <Icon.ArrowDown /> : <Icon.ArrowUp />}
+        </span>
+        <span className="meta">
+          {isClient ? "client:" : "server:"} <b>{ev.type}</b>
+          {ev._ts ? " | " + ev._ts : ""}
+        </span>
+        <span className="evt-id">{ev.event_id || ""}</span>
+      </div>
+      {open && (
+        <div className="event-json">
+          <pre>{JSON.stringify(ev, (k, v) => k.startsWith("_") ? undefined : v, 2)}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------- 主应用 ----------
+function App() {
+  const [config, setConfig] = useState({ base: "", key: "", model: "gpt-realtime",
+                                          text_model: "gpt-5.2", voice: "alloy", sys_prompt: "" });
+  const [msgs, setMsgs] = useState([]);
+  const [textMsgs, setTextMsgs] = useState([]);    // Responses WS 文本对话消息
+  const [textBusy, setTextBusy] = useState(false); // 一轮进行中（网关 409 保护）
+  const [events, setEvents] = useState([]);        // 事件流（新事件在前）
+  const [wsState, setWsState] = useState("disconnected");
+  const [micOn, setMicOn] = useState(false);
+  const [speaking, setSpeaking] = useState(false);
+  const [stage, setStage] = useState({ listen: false, think: false, speak: false });
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [tab, setTab] = useState("chat");
+  const [textIn, setTextIn] = useState("");
+  const [voiceIn, setVoiceIn] = useState("");   // Realtime Tab 内的文字输入
+  const [usage, setUsage] = useState(null);
+
+  const wsRef = useRef(null);
+  const engineRef = useRef(null);
+  const cfgRef = useRef(config);
+  const msgsRef = useRef(msgs);
+  const curAssistantRef = useRef(null);
+  const responseActiveRef = useRef(false);
+  const pendingUserRef = useRef(null);   // 待转写填充的用户占位气泡索引
+  // ---- Responses WS（文本对话）状态 ----
+  const textWsRef = useRef(null);
+  const [textState, setTextState] = useState("disconnected");
+  const textHistoryRef = useRef([]);     // [{role, text}] 会话历史
+  const textTurnRef = useRef(null);      // {resolve, reject, text, id}
+  const textMsgsRef = useRef([]);
+  textMsgsRef.current = textMsgs;
+  cfgRef.current = config;
+  msgsRef.current = msgs;
+
+  const pushEvent = useCallback((ev, dir) => {
+    const decorated = { ...ev, _dir: dir, _ts: new Date().toLocaleTimeString() };
+    setEvents(prev => [decorated, ...prev].slice(0, 300)); // 上限 300 条防爆内存
+  }, []);
+
+  const setMsgText = useCallback((idx, text) => {
+    setMsgs(prev => prev.map((m, i) => i === idx ? { ...m, text } : m));
+  }, []);
+
+  // 拉取配置 + 用量
+  const refreshUsage = useCallback(() => {
+    fetch("/api/usage?limit=1").then(r => r.json())
+      .then(d => setUsage(d.totals)).catch(() => {});
+  }, []);
+  useEffect(() => {
+    fetch("/api/config").then(r => r.json())
+      .then(c => setConfig({ base: c.base || "", key: c.key || "", model: c.model || "gpt-realtime",
+                             text_model: c.text_model || "gpt-5.2",
+                             voice: c.voice || "alloy", sys_prompt: c.sys_prompt || "" }))
+      .catch(() => {});
+    refreshUsage();
+  }, []);
+
+  // ---------- 服务端事件处理 ----------
+  const handleEvent = useCallback((raw) => {
+    let ev;
+    try { ev = JSON.parse(raw); } catch (e) { return; }
+    pushEvent(ev, "server");
+    const t = ev.type || "";
+
+    if (t === "session.created") {
+      const cfg = cfgRef.current;
+      const send = (obj) => wsRef.current && wsRef.current.send(JSON.stringify(obj));
+      send({
+        type: "session.update",
+        session: {
+          type: "realtime",
+          instructions: cfg.sys_prompt || undefined,
+          output_modalities: ["audio"],
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24000 },
+              transcription: { model: "whisper-1" },
+              turn_detection: { type: "server_vad", silence_duration_ms: 600, create_response: true }
+            },
+            output: { format: { type: "audio/pcm", rate: 24000 }, voice: cfg.voice }
+          }
+        }
+      });
+      return;
+    }
+    if (t === "session.updated") {
+      setWsState("connected");
+      setMsgs(prev => [...prev, { role: "sys", text: "会话就绪，打开麦克风开始语音对话，或在下方输入文字" }]);
+      return;
+    }
+    if (t === "input_audio_buffer.speech_started") {
+      const eng = engineRef.current;
+      if ((eng && eng.speaking) || responseActiveRef.current) {
+        if (eng) eng.stopPlayback();
+        if (wsRef.current) wsRef.current.send(JSON.stringify({ type: "response.cancel" }));
+        responseActiveRef.current = false;
+        setMsgs(prev => [...prev, { role: "sys", text: "— 已打断 —" }]);
+      }
+      // 立即插入用户占位气泡：转写完成事件往往晚于 response.created 到达，
+      // 先占位才能保证“用户语音”排在“助手回复”之前
+      setMsgs(prev => [...prev, { role: "user", text: "…", pending: true }]);
+      pendingUserRef.current = msgsRef.current.length;
+      setStage(s => ({ ...s, listen: true }));
+      return;
+    }
+    if (t === "input_audio_buffer.speech_stopped") {
+      setStage(s => ({ ...s, listen: false }));
+      return;
+    }
+    if (t === "conversation.item.input_audio_transcription.completed") {
+      const idx = pendingUserRef.current;
+      if (ev.transcript && ev.transcript.trim()) {
+        if (idx != null) {
+          // 填充占位气泡（若助手气泡已在其后插入，顺序仍正确）
+          setMsgs(prev => prev.map((m, i) => i === idx
+            ? { ...m, text: ev.transcript.trim(), pending: false } : m));
+          pendingUserRef.current = null;
+        } else {
+          setMsgs(prev => [...prev, { role: "user", text: ev.transcript.trim() }]);
+        }
+      } else if (idx != null) {
+        // 空转写：撤掉占位气泡
+        setMsgs(prev => prev.filter((_, i) => i !== idx));
+        pendingUserRef.current = null;
+      }
+      return;
+    }
+    if (t === "conversation.item.input_audio_transcription.failed") {
+      const idx = pendingUserRef.current;
+      if (idx != null) {
+        setMsgs(prev => prev.map((m, i) => i === idx
+          ? { ...m, text: "（语音转写失败）", pending: false } : m));
+        pendingUserRef.current = null;
+      }
+      return;
+    }
+    if (t === "response.created") {
+      responseActiveRef.current = true;
+      setStage(s => ({ ...s, think: true }));
+      setMsgs(prev => [...prev, { role: "assistant", text: "", streaming: true }]);
+      curAssistantRef.current = msgsRef.current.length;
+      return;
+    }
+    if (t === "response.output_audio_transcript.delta" ||
+        t === "response.audio_transcript.delta" ||
+        t === "response.output_audio.transcript.delta") {
+      const idx = curAssistantRef.current;
+      if (idx != null && typeof ev.delta === "string") {
+        const cur = msgsRef.current[idx];
+        setMsgText(idx, (cur ? cur.text : "") + ev.delta);
+      }
+      return;
+    }
+    if (t === "response.output_audio_transcript.done") {
+      const idx = curAssistantRef.current;
+      if (idx != null && ev.transcript) {
+        const cur = msgsRef.current[idx];
+        if (!cur || !cur.text) setMsgText(idx, ev.transcript);
+      }
+      return;
+    }
+    if (t === "response.output_audio.delta" || t === "response.audio.delta") {
+      if (ev.delta && engineRef.current) engineRef.current.play(int16FromB64(ev.delta));
+      setStage(s => ({ ...s, think: false, speak: true }));
+      return;
+    }
+    if (t === "response.done") {
+      responseActiveRef.current = false;
+      setStage(s => ({ ...s, think: false }));
+      refreshUsage();
+      const status = ev.response && ev.response.status;
+      const idx = curAssistantRef.current;
+      if (idx != null) {
+        let text = "";
+        if (ev.response && Array.isArray(ev.response.output)) {
+          for (const item of ev.response.output) {
+            if (Array.isArray(item.content)) {
+              for (const c of item.content) {
+                if (typeof c.transcript === "string") text += c.transcript;
+                else if (typeof c.text === "string") text += c.text;
+              }
+            }
+          }
+        }
+        const cur = msgsRef.current[idx];
+        if (text && (!cur || !cur.text)) setMsgText(idx, text);
+        setMsgs(prev => prev.map((m, i) => i === idx ? { ...m, streaming: false } : m));
+      }
+      curAssistantRef.current = null;
+      if (status === "failed") {
+        const d = ev.response && ev.response.status_details && ev.response.status_details.error
+          ? ev.response.status_details.error.message : "";
+        setMsgs(prev => [...prev, { role: "syserr", text: "响应失败" + (d ? ": " + d : "") }]);
+      } else if (status === "incomplete") {
+        setMsgs(prev => [...prev, { role: "sys", text: "响应未完整结束（可能达到长度上限）" }]);
+      }
+      return;
+    }
+    if (t === "error") {
+      const msg = (ev.error && (ev.error.message || ev.error.code)) || "未知错误";
+      if (/no active response/i.test(String(msg))) return;
+      setMsgs(prev => [...prev, { role: "syserr", text: "错误: " + msg }]);
+      return;
+    }
+  }, [setMsgText, pushEvent, refreshUsage]);
+
+  // ---------- 连接管理 ----------
+  const disconnect = useCallback(() => {
+    if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} wsRef.current = null; }
+    if (engineRef.current) { engineRef.current.stopMic(); engineRef.current.stopPlayback(); }
+    responseActiveRef.current = false;
+    curAssistantRef.current = null;
+    pendingUserRef.current = null;
+    // 清理未完成的占位气泡
+    setMsgs(prev => prev.map(m => m.pending ? { ...m, pending: false, text: m.text === "…" ? "" : m.text } : m)
+                    .filter(m => !(m.pending === undefined && m.role === "user" && !m.text)));
+    setMicOn(false); setWsState("disconnected");
+    setStage({ listen: false, think: false, speak: false });
+  }, []);
+
+  const connect = useCallback(() => {
+    disconnect();
+    setWsState("connecting");
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+    wsRef.current = ws;
+    ws.onmessage = (e) => handleEvent(e.data);
+    ws.onclose = () => {
+      if (wsRef.current === ws) {
+        wsRef.current = null;
+        responseActiveRef.current = false;
+        curAssistantRef.current = null;
+        setWsState("disconnected");
+        setStage({ listen: false, think: false, speak: false });
+      }
+    };
+    ws.onerror = () => {};
+  }, [disconnect, handleEvent]);
+
+  // ---------- 麦克风 ----------
+  const toggleMic = useCallback(async () => {
+    if (micOn) {
+      engineRef.current && engineRef.current.stopMic();
+      setMicOn(false);
+      return;
+    }
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+      setMsgs(prev => [...prev, { role: "syserr", text: "请先连接会话" }]);
+      return;
+    }
+    if (!engineRef.current) {
+      const eng = new AudioEngine();
+      eng.onSend = (b64) => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          const msg = { type: "input_audio_buffer.append", audio: b64 };
+          wsRef.current.send(JSON.stringify(msg));
+          pushEvent(msg, "client");
+        }
+      };
+      eng.onSpeakingChange = setSpeaking;
+      engineRef.current = eng;
+    }
+    try {
+      await engineRef.current.startMic();
+      setMicOn(true);
+    } catch (e) {
+      setMsgs(prev => [...prev, { role: "syserr", text: "无法访问麦克风: " + e.message }]);
+    }
+  }, [micOn, pushEvent]);
+
+  // ---------- 文字输入（仿官方 console：conversation.item.create + response.create） ----------
+  const sendText = useCallback(() => {
+    const text = voiceIn.trim();
+    if (!text || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const item = {
+      type: "conversation.item.create",
+      item: { type: "message", role: "user", content: [{ type: "input_text", text }] }
+    };
+    wsRef.current.send(JSON.stringify(item));
+    pushEvent(item, "client");
+    const create = { type: "response.create" };
+    wsRef.current.send(JSON.stringify(create));
+    pushEvent(create, "client");
+    setMsgs(prev => [...prev, { role: "user", text }]);
+    setVoiceIn("");
+  }, [voiceIn, pushEvent]);
+
+  const interrupt = useCallback(() => {
+    if (engineRef.current) engineRef.current.stopPlayback();
+    if (responseActiveRef.current && wsRef.current) {
+      wsRef.current.send(JSON.stringify({ type: "response.cancel" }));
+      responseActiveRef.current = false;
+      setMsgs(prev => [...prev, { role: "sys", text: "— 手动打断 —" }]);
+    }
+  }, []);
+
+  // ---------- Responses WS（文本对话） ----------
+  const textIdRef = useRef(0);           // 消息唯一 id 自增器
+  const pushTextMsg = useCallback((m) => {
+    const id = ++textIdRef.current;
+    setTextMsgs(prev => [...prev, { ...m, id }]);
+    return id;
+  }, []);
+  const setTextMsgBody = useCallback((id, text, extra) => {
+    setTextMsgs(prev => prev.map(m => m.id === id ? { ...m, text, ...(extra || {}) } : m));
+  }, []);
+
+  const handleTextEvent = useCallback((raw) => {
+    let ev;
+    try { ev = JSON.parse(raw); } catch (e) { return; }
+    pushEvent(ev, "server");
+    const t = ev.type || "";
+    const turn = textTurnRef.current;
+
+    if (t === "error") {
+      const msg = (ev.error && (ev.error.message || ev.error.code)) || "未知错误";
+      if (turn) {
+        turn.reject(new Error(msg));
+      } else {
+        setTextMsgs(prev => [...prev, { role: "syserr", text: "错误: " + msg }]);
+      }
+      return;
+    }
+    if (!turn) return;
+    if (t === "response.output_text.delta" && typeof ev.delta === "string") {
+      turn.text += ev.delta;
+      setTextMsgBody(turn.id, turn.text);
+      return;
+    }
+    if (["response.completed", "response.done", "response.incomplete", "response.failed"].includes(t)) {
+      let finalText = "";
+      if (ev.response && Array.isArray(ev.response.output)) {
+        for (const item of ev.response.output) {
+          if (Array.isArray(item.content)) {
+            for (const c of item.content) {
+              if ((c.type === "output_text" || c.type === "text") && c.text) finalText += c.text;
+            }
+          }
+        }
+      }
+      if (!finalText) finalText = turn.text;
+      if (t === "response.failed" || t === "response.incomplete") {
+        turn.reject(new Error(t + (finalText ? "（已生成部分：" + finalText.slice(0, 100) + "…）" : "（无输出）")));
+        return;
+      }
+      turn.resolve(finalText);
+    }
+  }, [pushEvent, setTextMsgBody]);
+
+  const connectText = useCallback(() => {
+    if (textWsRef.current) { try { textWsRef.current.close(); } catch (e) {} textWsRef.current = null; }
+    setTextState("connecting");
+    const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws-responses");
+    textWsRef.current = ws;
+    ws.onopen = () => {
+      setTextState("connected");
+      setTextMsgs(prev => [...prev, { role: "sys", text: "Responses WS 已连接 · 模型 " + (cfgRef.current.text_model || "-") }]);
+    };
+    ws.onmessage = (e) => handleTextEvent(e.data);
+    ws.onclose = () => {
+      if (textWsRef.current === ws) {
+        textWsRef.current = null;
+        setTextState("disconnected");
+        const turn = textTurnRef.current;
+        if (turn) { turn.reject(new Error("连接已断开")); textTurnRef.current = null; }
+        setTextBusy(false);
+      }
+    };
+    ws.onerror = () => {};
+  }, [handleTextEvent]);
+
+  const sendTextTurn = useCallback(async () => {
+    const text = textIn.trim();
+    if (!text || textBusy) return;
+    const ws = textWsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      setTextMsgs(prev => [...prev, { role: "syserr", text: "请先连接 Responses WS" }]);
+      return;
+    }
+    setTextIn("");
+    setTextBusy(true);
+    pushTextMsg({ role: "user", text });
+    textHistoryRef.current.push({ role: "user", text });
+
+    const bubbleId = pushTextMsg({ role: "assistant", text: "", streaming: true });
+
+    // Responses API 输入格式：user → input_text，assistant → output_text
+    const input = textHistoryRef.current.map(m => ({
+      role: m.role,
+      content: [{ type: m.role === "assistant" ? "output_text" : "input_text", text: m.text }]
+    }));
+    const streamId = "turn-" + Date.now() + "-" + Math.random().toString(36).slice(2, 8);
+    const create = {
+      type: "response.create",
+      stream_id: streamId,
+      response: {
+        instructions: cfgRef.current.sys_prompt || undefined,
+        input
+      }
+    };
+    ws.send(JSON.stringify(create));
+    pushEvent(create, "client");
+
+    await new Promise((resolve, reject) => {
+      textTurnRef.current = { resolve, reject, text: "", id: bubbleId };
+      // 兜底超时
+      const timer = setTimeout(() => {
+        if (textTurnRef.current) {
+          textTurnRef.current.reject(new Error("响应超时（120s）"));
+          textTurnRef.current = null;
+        }
+      }, 120000);
+      const origResolve = resolve;
+      textTurnRef.current.resolve = (t) => { clearTimeout(timer); textTurnRef.current = null; origResolve(t); };
+      const origReject = reject;
+      textTurnRef.current.reject = (e) => { clearTimeout(timer); textTurnRef.current = null; origReject(e); };
+    }).then(reply => {
+      setTextMsgBody(bubbleId, reply, { streaming: false });
+      textHistoryRef.current.push({ role: "assistant", text: reply });
+      refreshUsage();
+    }).catch(err => {
+      setTextMsgBody(bubbleId, "", { streaming: false, failed: true });
+      setTextMsgs(prev => [...prev, { role: "syserr", text: String(err.message || err) }]);
+    }).finally(() => {
+      setTextBusy(false);
+    });
+  }, [textIn, textBusy, pushTextMsg, setTextMsgBody, pushEvent, refreshUsage]);
+
+  // ---------- 设置保存 ----------
+  const saveConfig = useCallback(async (values) => {
+    const body = { base: values.base, model: values.model, text_model: values.text_model || "",
+                   voice: values.voice, sys_prompt: values.sys_prompt || "", key: values.key || "" };
+    await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" },
+                                  body: JSON.stringify(body) });
+    const c = await fetch("/api/config").then(r => r.json());
+    setConfig(c);
+    setSettingsOpen(false);
+    disconnect();
+    if (textWsRef.current) { try { textWsRef.current.close(); } catch (e) {} textWsRef.current = null; }
+    setTextState("disconnected");
+    setMsgs(prev => [...prev, { role: "sys", text: "设置已保存，配置变更后需重新连接" }]);
+  }, [disconnect]);
+
+  // ---------- 渲染 ----------
+  const connected = wsState === "connected";
+  const statusText = connected ? "connected" : (wsState === "connecting" ? "connecting..." : "offline");
+  const statusColor = connected ? "#16a34a" : (wsState === "connecting" ? "#d97706" : "#9ca3af");
+  const totals = usage || {};
+
+  // 事件流渲染：delta 事件每类只显示一条（仿官方 console）
+  const eventCards = [];
+  const seenDelta = {};
+  for (const ev of events) {
+    if (ev.type && ev.type.endsWith("delta")) {
+      if (seenDelta[ev.type]) continue;
+      seenDelta[ev.type] = true;
+    }
+    eventCards.push(<EventCard key={(ev.event_id || "") + ev._ts + eventCards.length} ev={ev} />);
+  }
+
+  return (
+    <ConfigProvider theme={{ token: { colorPrimary: "#2563eb", fontFamily: "inherit" } }}>
+      <AntApp>
+        {/* 顶部导航 */}
+        <nav className="nav">
+          <span style={{ color: "var(--accent-red)", display: "inline-flex" }}><Icon.Bolt size={20} /></span>
+          <h1>realtime console</h1>
+          <span style={{ fontSize: "0.75rem", color: "var(--sub)" }}>语音对话调试台</span>
+          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: "0.75rem", color: statusColor }}>
+            <span className={connected ? "blink" : ""}
+                  style={{ width: 8, height: 8, borderRadius: "50%", background: statusColor, display: "inline-block" }} />
+            {statusText}
+          </span>
+          <div className="spacer" />
+          <Tooltip title="接口设置">
+            <button className="pill-btn" onClick={() => setSettingsOpen(true)}>
+              <Icon.Settings size={14} /> 设置
+            </button>
+          </Tooltip>
+        </nav>
+
+        {/* 左侧主区 */}
+        <div className="main">
+          <div className="pane-tabs">
+            <Tabs activeKey={tab} onChange={setTab} size="small"
+              items={[
+                { key: "chat", label: "语音对话 (Realtime)" },
+                { key: "text", label: "文本对话 (Responses WS)" },
+                { key: "events", label: "事件流" }
+              ]} />
+          </div>
+          <div className="pane-body">
+            {tab === "chat" ? (
+              <div>
+                {msgs.map((m, i) => {
+                  if (m.role === "sys" || m.role === "syserr") {
+                    return <div key={i} className={"bubble sysnote" + (m.role === "syserr" ? " err" : "")}>{m.text}</div>;
+                  }
+                  return (
+                    <div key={i} className={"bubble " + m.role}>
+                      <span className="who">{m.role === "user" ? "YOU" : "ASSISTANT"}</span>
+                      <span className={m.streaming && !m.text ? "cursor-blink" : ""}>
+                        {m.pending ? "正在聆听…" : m.text}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : tab === "text" ? (
+              <div>
+                {textMsgs.map((m, i) => {
+                  if (m.role === "sys" || m.role === "syserr") {
+                    return <div key={i} className={"bubble sysnote" + (m.role === "syserr" ? " err" : "")}>{m.text}</div>;
+                  }
+                  return (
+                    <div key={i} className={"bubble " + m.role}>
+                      <span className="who">{m.role === "user" ? "YOU" : (config.text_model || "ASSISTANT")}</span>
+                      <span className={m.streaming && !m.text ? "cursor-blink" : ""}>
+                        {m.failed && !m.text ? "（本轮失败）" : (m.text || "")}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div>
+                {eventCards.length === 0
+                  ? <div className="event-empty">Awaiting events...</div>
+                  : eventCards}
+              </div>
+            )}
+          </div>
+
+          {/* 底部控制条：随 Tab 切换 */}
+          {tab === "text" ? (
+            <div className="controls">
+              {textState !== "connected" ? (
+                <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100%" }}>
+                  <button className="pill-btn red" onClick={connectText}
+                          disabled={!config.base || textState === "connecting"}
+                          style={{ padding: "14px 32px", fontSize: "0.9rem" }}>
+                    <Icon.CloudOn size={16} /> {textState === "connecting" ? "connecting..." : "connect responses ws"}
+                  </button>
+                </div>
+              ) : (
+                <React.Fragment>
+                  <input className="pill-input" placeholder="chat via /v1/responses ..."
+                    value={textIn}
+                    disabled={textBusy}
+                    onChange={(e) => setTextIn(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) sendTextTurn(); }} />
+                  <button className="pill-btn blue" onClick={sendTextTurn} disabled={!textIn.trim() || textBusy}>
+                    <Icon.Send size={14} /> {textBusy ? "生成中…" : "send"}
+                  </button>
+                  <button className="pill-btn" onClick={() => {
+                    if (textWsRef.current) { try { textWsRef.current.close(); } catch (e) {} }
+                  }}><Icon.CloudOff size={14} /> disconnect</button>
+                </React.Fragment>
+              )}
+            </div>
+          ) : (
+          <div className="controls">
+            {!connected ? (
+              <div style={{ display: "flex", justifyContent: "center", alignItems: "center", width: "100%" }}>
+                <button className="pill-btn red" onClick={connect} disabled={!config.base || wsState === "connecting"}
+                        style={{ padding: "14px 32px", fontSize: "0.9rem" }}>
+                  <Icon.CloudOn size={16} /> {wsState === "connecting" ? "starting session..." : "start session"}
+                </button>
+              </div>
+            ) : (
+              <React.Fragment>
+                <Tooltip title={micOn ? "关闭麦克风" : "打开麦克风"}>
+                  <button className={"round-btn" + (micOn ? " on" : "")} onClick={toggleMic}>
+                    {micOn ? <Icon.MicOff size={26} /> : <Icon.Mic size={26} />}
+                  </button>
+                </Tooltip>
+                <input className="pill-input" placeholder="send a text message..."
+                  value={voiceIn}
+                  onChange={(e) => setVoiceIn(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter" && !e.nativeEvent.isComposing) sendText(); }} />
+                <button className="pill-btn blue" onClick={sendText} disabled={!voiceIn.trim()}>
+                  <Icon.Send size={14} /> send text
+                </button>
+                <Tooltip title="打断当前播报">
+                  <button className="pill-btn" onClick={interrupt}><Icon.Stop size={14} /> 打断</button>
+                </Tooltip>
+                <button className="pill-btn" onClick={disconnect}><Icon.CloudOff size={14} /> disconnect</button>
+              </React.Fragment>
+            )}
+          </div>
+          )}
+        </div>
+
+        {/* 右侧面板（仿官方 ToolPanel） */}
+        <div className="side">
+          <div className="panel">
+            <h3><Icon.Bolt size={13} /> SESSION</h3>
+            <div className="kv"><span className="k">realtime 模型</span><span className="v">{config.model || "-"}</span></div>
+            <div className="kv"><span className="k">文本模型</span><span className="v">{config.text_model || "-"}</span></div>
+            <div className="kv"><span className="k">voice</span><span className="v">{config.voice || "-"}</span></div>
+            <div className="kv"><span className="k">api base</span><span className="v">{config.base || "-"}</span></div>
+            <div className="kv"><span className="k">vad</span><span className="v">server_vad · 600ms</span></div>
+            <div className="kv"><span className="k">audio</span><span className="v">pcm16 · 24kHz</span></div>
+          </div>
+
+          <div className="panel">
+            <h3><Icon.Ear size={13} /> STATE</h3>
+            <div className="stage-strip">
+              <span className={"stage" + (stage.listen ? " on" : "")}><Icon.Ear /> 聆听</span>
+              <span className={"stage" + (stage.think ? " on" : "")}><Icon.Brain /> 生成</span>
+              <span className={"stage" + (stage.speak ? " on" : "")}><Icon.Speaker /> 播报</span>
+            </div>
+            <div className="kv">
+              <span className="k">麦克风</span>
+              <span className="v" style={{ color: micOn ? "#16a34a" : "var(--sub)" }}>
+                {micOn ? "OPEN" : "CLOSED"}
+              </span>
+            </div>
+            <div className="kv">
+              <span className="k">播报状态</span>
+              <span className="v" style={{ color: speaking ? "#2563eb" : "var(--sub)" }}>
+                {speaking ? "SPEAKING" : "IDLE"}
+              </span>
+            </div>
+          </div>
+
+          <div className="panel">
+            <h3><Icon.Chart size={13} /> USAGE (SQLite)</h3>
+            <div className="usage-mini">
+              <div className="cell"><div className="num">{totals.id || 0}</div><div className="lbl">对话轮数</div></div>
+              <div className="cell"><div className="num">{totals.total_tokens || 0}</div><div className="lbl">累计 tokens</div></div>
+              <div className="cell"><div className="num">{totals.input_tokens || 0}</div><div className="lbl">输入 tokens</div></div>
+              <div className="cell"><div className="num">{totals.output_tokens || 0}</div><div className="lbl">输出 tokens</div></div>
+            </div>
+          </div>
+
+          <div className="panel">
+            <h3><Icon.Settings size={13} /> NOTES</h3>
+            <div style={{ fontSize: "0.75rem", color: "var(--sub)", lineHeight: 1.8 }}>
+              麦克风常开 · 服务端 VAD 自动断句<br />
+              AI 播报时开口即为打断（barge-in）<br />
+              「事件流」页可查看全部 WS 原始事件<br />
+              文字消息走 conversation.item.create
+            </div>
+          </div>
+        </div>
+
+        <SettingsModal open={settingsOpen} config={config}
+          onClose={() => setSettingsOpen(false)} onSave={saveConfig} />
+      </AntApp>
+    </ConfigProvider>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
