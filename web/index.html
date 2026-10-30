@@ -251,11 +251,25 @@ function int16FromB64(b64) {
   for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
   return new Int16Array(u8.buffer);
 }
+// 24000Hz -> 16000Hz 线性插值降采样（Qwen 渠道输入要求 16kHz）
+function downsample24to16(i16) {
+  const ratio = 1.5;
+  const outLen = Math.floor(i16.length / ratio);
+  const out = new Int16Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos), i1 = Math.min(i0 + 1, i16.length - 1);
+    const frac = pos - i0;
+    out[i] = Math.round(i16[i0] * (1 - frac) + i16[i1] * frac);
+  }
+  return out;
+}
 
 class AudioEngine {
   constructor() {
     this.ctx = null; this.worklet = null; this.stream = null; this.source = null;
     this.sendBuf = new Int16Array(0); this.sendTimer = null;
+    this.inputRate = 24000; // 采集固定 24kHz；Qwen 渠道需按 16kHz 上送，flush 时降采样
     this.onSend = null;
     this.playSources = []; this.nextPlayTime = 0; this.speaking = false;
     this.onSpeakingChange = null;
@@ -288,7 +302,9 @@ class AudioEngine {
   }
   flush() {
     if (!this.sendBuf.length) return;
-    if (this.onSend) this.onSend(b64FromInt16(this.sendBuf));
+    let pcm = this.sendBuf;
+    if (this.inputRate === 16000) pcm = downsample24to16(pcm);
+    if (this.onSend && pcm.length) this.onSend(b64FromInt16(pcm));
     this.sendBuf = new Int16Array(0);
   }
   stopMic() {
@@ -336,16 +352,21 @@ class AudioEngine {
 const { useState, useRef, useEffect, useCallback } = React;
 const { ConfigProvider, Modal, Form, Input, Select, Tabs, Tooltip, App: AntApp, Typography } = antd;
 const Icon = window.Icon;
-const VOICES = ["alloy", "echo", "shimmer", "ash", "ballad", "coral", "sage", "verse", "marin", "cedar"];
+// 默认音色候选（OpenAI Realtime GA 内置）。上游没有音色枚举接口，
+// 实际列表存在服务端 config.voices，可随渠道在设置里编辑。
+const DEFAULT_VOICES = ["alloy", "echo", "shimmer", "ash", "ballad", "coral", "sage", "verse", "cedar"];
 
 // ---------- 设置弹窗 ----------
 function SettingsModal({ open, config, onClose, onSave }) {
   const [form] = Form.useForm();
+  const voicesVal = Form.useWatch("voices", form) || [];
+  const voiceOpts = Array.from(new Set([...voicesVal, ...(config.voice ? [config.voice] : [])]))
+    .filter(Boolean).map(v => ({ value: v, label: v }));
   useEffect(() => {
     if (open) {
       form.setFieldsValue({
         base: config.base, model: config.model, text_model: config.text_model,
-        voice: config.voice, sys_prompt: config.sys_prompt, key: ""
+        voice: config.voice, voices: config.voices || [], sys_prompt: config.sys_prompt, key: ""
       });
     }
   }, [open, config]);
@@ -365,8 +386,12 @@ function SettingsModal({ open, config, onClose, onSave }) {
         <Form.Item name="text_model" label="文本模型（Responses WS）">
           <Input placeholder="gpt-5.2 / claude-sonnet-4-5 等" />
         </Form.Item>
-        <Form.Item name="voice" label="音色" initialValue="alloy">
-          <Select options={VOICES.map(v => ({ value: v, label: v }))} />
+        <Form.Item name="voices" label="音色候选列表（回车添加，随上游渠道维护）">
+          <Select mode="tags" open={false} tokenSeparators={[",", " "]}
+                  placeholder="如 alloy, echo, Tina, Raymond" />
+        </Form.Item>
+        <Form.Item name="voice" label="音色" rules={[{ required: true, message: "必填" }]}>
+          <Select showSearch options={voiceOpts} notFoundContent="先在上方候选列表里添加音色，或直接输入" />
         </Form.Item>
         <Form.Item name="sys_prompt" label="系统提示词（人设）">
           <Input.TextArea rows={2} placeholder="你是一个友好的语音助手，回答简短口语化。" />
@@ -404,7 +429,8 @@ function EventCard({ ev }) {
 // ---------- 主应用 ----------
 function App() {
   const [config, setConfig] = useState({ base: "", key: "", model: "gpt-realtime",
-                                          text_model: "gpt-5.2", voice: "alloy", sys_prompt: "" });
+                                          text_model: "gpt-5.2", voice: "alloy",
+                                          voices: DEFAULT_VOICES, sys_prompt: "" });
   const [msgs, setMsgs] = useState([]);
   const [textMsgs, setTextMsgs] = useState([]);    // Responses WS 文本对话消息
   const [textBusy, setTextBusy] = useState(false); // 一轮进行中（网关 409 保护）
@@ -425,6 +451,7 @@ function App() {
   const msgsRef = useRef(msgs);
   const curAssistantRef = useRef(null);
   const responseActiveRef = useRef(false);
+  const audioDeltaRef = useRef(false);      // 本轮是否已收到语音转写 delta（用于 text 通道兜底判断）
   const pendingUserRef = useRef(null);   // 待转写填充的用户占位气泡索引
   // ---- Responses WS（文本对话）状态 ----
   const textWsRef = useRef(null);
@@ -454,10 +481,31 @@ function App() {
     fetch("/api/config").then(r => r.json())
       .then(c => setConfig({ base: c.base || "", key: c.key || "", model: c.model || "gpt-realtime",
                              text_model: c.text_model || "gpt-5.2",
-                             voice: c.voice || "alloy", sys_prompt: c.sys_prompt || "" }))
+                             voice: c.voice || "alloy",
+                             voices: Array.isArray(c.voices) && c.voices.length ? c.voices : DEFAULT_VOICES,
+                             sys_prompt: c.sys_prompt || "" }))
       .catch(() => {});
     refreshUsage();
   }, []);
+
+  // ---------- 播放引擎（按需创建：不开麦只打字时也要能朗读回复） ----------
+  const ensureEngine = useCallback(() => {
+    if (!engineRef.current) {
+      const eng = new AudioEngine();
+      eng.onSend = (b64) => {
+        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+          const msg = { type: "input_audio_buffer.append", audio: b64 };
+          wsRef.current.send(JSON.stringify(msg));
+          pushEvent(msg, "client");
+        }
+      };
+      eng.onSpeakingChange = setSpeaking;
+      engineRef.current = eng;
+    }
+    // 引擎复用跨配置变更，每次按当前模型刷新输入采样率
+    engineRef.current.inputRate = /qwen/i.test(cfgRef.current.model || "") ? 16000 : 24000;
+    return engineRef.current;
+  }, [pushEvent]);
 
   // ---------- 服务端事件处理 ----------
   const handleEvent = useCallback((raw) => {
@@ -469,22 +517,44 @@ function App() {
     if (t === "session.created") {
       const cfg = cfgRef.current;
       const send = (obj) => wsRef.current && wsRef.current.send(JSON.stringify(obj));
-      send({
-        type: "session.update",
-        session: {
-          type: "realtime",
-          instructions: cfg.sys_prompt || undefined,
-          output_modalities: ["audio"],
-          audio: {
-            input: {
-              format: { type: "audio/pcm", rate: 24000 },
-              transcription: { model: "whisper-1" },
-              turn_detection: { type: "server_vad", silence_duration_ms: 600, create_response: true }
-            },
-            output: { format: { type: "audio/pcm", rate: 24000 }, voice: cfg.voice }
+      // 两套协议互不兼容，按模型名分流：
+      // OpenAI Realtime GA：session.type/output_modalities，format 为 {type:"audio/pcm", rate}，
+      //   转写和 VAD 嵌在 audio.input 里
+      // 百炼 Qwen-Omni-Realtime：modalities，format 为 {type:"pcm", sample_rate}，
+      //   转写(input_audio_transcription)和 turn_detection 是 session 顶层字段；
+      //   参数不合法时整单拒绝并返回 error 事件，会话停留在默认配置
+      if (/qwen/i.test(cfg.model || "")) {
+        send({
+          type: "session.update",
+          session: {
+            modalities: ["text", "audio"],
+            instructions: cfg.sys_prompt || undefined,
+            input_audio_transcription: { model: "qwen3-asr-flash-realtime" },
+            turn_detection: { type: "server_vad", threshold: 0.5, silence_duration_ms: 600 },
+            audio: {
+              input: { format: { type: "pcm", sample_rate: 16000 } }, // qwen3.8 输入保守值 16k，麦克风 24k 在引擎里降采样
+              output: { format: { type: "pcm", sample_rate: 24000 }, voice: cfg.voice }
+            }
           }
-        }
-      });
+        });
+      } else {
+        send({
+          type: "session.update",
+          session: {
+            type: "realtime",
+            instructions: cfg.sys_prompt || undefined,
+            output_modalities: ["audio"],
+            audio: {
+              input: {
+                format: { type: "audio/pcm", rate: 24000 },
+                transcription: { model: "whisper-1" },
+                turn_detection: { type: "server_vad", silence_duration_ms: 600, create_response: true }
+              },
+              output: { format: { type: "audio/pcm", rate: 24000 }, voice: cfg.voice }
+            }
+          }
+        });
+      }
       return;
     }
     if (t === "session.updated") {
@@ -540,6 +610,7 @@ function App() {
     }
     if (t === "response.created") {
       responseActiveRef.current = true;
+      audioDeltaRef.current = false;
       setStage(s => ({ ...s, think: true }));
       setMsgs(prev => [...prev, { role: "assistant", text: "", streaming: true }]);
       curAssistantRef.current = msgsRef.current.length;
@@ -550,21 +621,37 @@ function App() {
         t === "response.output_audio.transcript.delta") {
       const idx = curAssistantRef.current;
       if (idx != null && typeof ev.delta === "string") {
+        // 百炼双模态下 text 通道与 audio 转写通道内容可能不同；
+        // 一旦语音转写 delta 到达，清掉之前 text 通道兜底的预览，以转写为准
+        if (!audioDeltaRef.current) {
+          audioDeltaRef.current = true;
+          setMsgText(idx, ev.delta);
+        } else {
+          const cur = msgsRef.current[idx];
+          setMsgText(idx, (cur ? cur.text : "") + ev.delta);
+        }
+      }
+      return;
+    }
+    if (t === "response.text.delta") {
+      // 文本通道增量：仅当本轮还没收到任何语音转写 delta 时作流式预览兜底
+      const idx = curAssistantRef.current;
+      if (idx != null && !audioDeltaRef.current && typeof ev.delta === "string") {
         const cur = msgsRef.current[idx];
         setMsgText(idx, (cur ? cur.text : "") + ev.delta);
       }
       return;
     }
-    if (t === "response.output_audio_transcript.done") {
+    if (t === "response.output_audio_transcript.done" || t === "response.audio_transcript.done") {
+      // 语音转写全文是权威值：增量可能被上游修正，无条件覆盖气泡
       const idx = curAssistantRef.current;
-      if (idx != null && ev.transcript) {
-        const cur = msgsRef.current[idx];
-        if (!cur || !cur.text) setMsgText(idx, ev.transcript);
+      if (idx != null && typeof ev.transcript === "string" && ev.transcript.trim()) {
+        setMsgText(idx, ev.transcript);
       }
       return;
     }
     if (t === "response.output_audio.delta" || t === "response.audio.delta") {
-      if (ev.delta && engineRef.current) engineRef.current.play(int16FromB64(ev.delta));
+      if (ev.delta) ensureEngine().play(int16FromB64(ev.delta));
       setStage(s => ({ ...s, think: false, speak: true }));
       return;
     }
@@ -577,20 +664,25 @@ function App() {
       if (idx != null) {
         let text = "";
         if (ev.response && Array.isArray(ev.response.output)) {
+          // Qwen 开 text+audio 双模态时 output 里同时有 text 内容和 audio transcript，
+          // 气泡应显示"说出来的"内容：优先取 transcript，纯文本模态才兜底取 text
+          let spoken = "", plain = "";
           for (const item of ev.response.output) {
             if (Array.isArray(item.content)) {
               for (const c of item.content) {
-                if (typeof c.transcript === "string") text += c.transcript;
-                else if (typeof c.text === "string") text += c.text;
+                if (typeof c.transcript === "string") spoken += c.transcript;
+                else if (typeof c.text === "string") plain += c.text;
               }
             }
           }
+          text = spoken || plain;
         }
         const cur = msgsRef.current[idx];
         if (text && (!cur || !cur.text)) setMsgText(idx, text);
         setMsgs(prev => prev.map((m, i) => i === idx ? { ...m, streaming: false } : m));
       }
       curAssistantRef.current = null;
+      audioDeltaRef.current = false;
       if (status === "failed") {
         const d = ev.response && ev.response.status_details && ev.response.status_details.error
           ? ev.response.status_details.error.message : "";
@@ -606,7 +698,7 @@ function App() {
       setMsgs(prev => [...prev, { role: "syserr", text: "错误: " + msg }]);
       return;
     }
-  }, [setMsgText, pushEvent, refreshUsage]);
+  }, [setMsgText, pushEvent, refreshUsage, ensureEngine]);
 
   // ---------- 连接管理 ----------
   const disconnect = useCallback(() => {
@@ -647,29 +739,17 @@ function App() {
       setMicOn(false);
       return;
     }
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+    if (!engineRef.current || !wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       setMsgs(prev => [...prev, { role: "syserr", text: "请先连接会话" }]);
       return;
     }
-    if (!engineRef.current) {
-      const eng = new AudioEngine();
-      eng.onSend = (b64) => {
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          const msg = { type: "input_audio_buffer.append", audio: b64 };
-          wsRef.current.send(JSON.stringify(msg));
-          pushEvent(msg, "client");
-        }
-      };
-      eng.onSpeakingChange = setSpeaking;
-      engineRef.current = eng;
-    }
     try {
-      await engineRef.current.startMic();
+      await ensureEngine().startMic();
       setMicOn(true);
     } catch (e) {
       setMsgs(prev => [...prev, { role: "syserr", text: "无法访问麦克风: " + e.message }]);
     }
-  }, [micOn, pushEvent]);
+  }, [micOn, pushEvent, ensureEngine]);
 
   // ---------- 文字输入（仿官方 console：conversation.item.create + response.create） ----------
   const sendText = useCallback(() => {
@@ -832,7 +912,8 @@ function App() {
   // ---------- 设置保存 ----------
   const saveConfig = useCallback(async (values) => {
     const body = { base: values.base, model: values.model, text_model: values.text_model || "",
-                   voice: values.voice, sys_prompt: values.sys_prompt || "", key: values.key || "" };
+                   voice: values.voice, voices: values.voices || [],
+                   sys_prompt: values.sys_prompt || "", key: values.key || "" };
     await fetch("/api/config", { method: "PUT", headers: { "Content-Type": "application/json" },
                                   body: JSON.stringify(body) });
     const c = await fetch("/api/config").then(r => r.json());

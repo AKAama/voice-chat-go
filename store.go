@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"strings"
 	"time"
@@ -12,13 +13,18 @@ import (
 // Config 是唯一的配置行（id=1）。Key 只存在服务端数据库，前端通过 /api/config
 // 读取时会拿到脱敏值，浏览器全程接触不到完整 Key。
 type Config struct {
-	Base      string `json:"base"`
-	Key       string `json:"key"`
-	Model     string `json:"model"`      // Realtime 模型
-	TextModel string `json:"text_model"` // Responses WS 文本模型
-	Voice     string `json:"voice"`
-	SysPrompt string `json:"sys_prompt"`
+	Base      string   `json:"base"`
+	Key       string   `json:"key"`
+	Model     string   `json:"model"`      // Realtime 模型
+	TextModel string   `json:"text_model"` // Responses WS 文本模型
+	Voice     string   `json:"voice"`
+	Voices    []string `json:"voices"` // 音色候选列表（可编辑，随上游渠道维护），DB 中存 JSON 数组
+	SysPrompt string   `json:"sys_prompt"`
 }
+
+// defaultVoices 是未配置时的默认候选（OpenAI Realtime GA 内置音色）。
+// 上游不提供音色枚举接口，列表只能按文档维护，换渠道时在设置页改。
+var defaultVoices = []string{"alloy", "ash", "ballad", "cedar", "coral", "echo", "sage", "shimmer", "verse"}
 
 // UsageRow 是一轮 response.done 的用量快照。
 type UsageRow struct {
@@ -83,39 +89,65 @@ CREATE INDEX IF NOT EXISTS idx_usage_created ON usage(created_at DESC);`)
 			return err
 		}
 	}
+	// 旧库升级：补 voices 列（JSON 数组文本）
+	if _, err := s.db.Exec(`ALTER TABLE config ADD COLUMN voices TEXT NOT NULL DEFAULT '[]'`); err != nil {
+		if !strings.Contains(err.Error(), "duplicate column") {
+			return err
+		}
+	}
 	return nil
 }
 
 func (s *Store) GetConfig() (Config, error) {
 	var c Config
+	var voicesJSON string
 	var updatedAt int64
 	err := s.db.QueryRow(
-		`SELECT base, key, model, text_model, voice, sys_prompt, updated_at FROM config WHERE id = 1`,
-	).Scan(&c.Base, &c.Key, &c.Model, &c.TextModel, &c.Voice, &c.SysPrompt, &updatedAt)
+		`SELECT base, key, model, text_model, voice, voices, sys_prompt, updated_at FROM config WHERE id = 1`,
+	).Scan(&c.Base, &c.Key, &c.Model, &c.TextModel, &c.Voice, &voicesJSON, &c.SysPrompt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		// 未配置过：给默认值（模型名按 GA 系列填，用户可在设置里改）
-		return Config{Model: "gpt-realtime", TextModel: "gpt-5.2", Voice: "alloy"}, nil
+		return Config{Model: "gpt-realtime", TextModel: "gpt-5.2", Voice: "alloy", Voices: defaultVoices}, nil
 	}
 	if err != nil {
 		return c, err
 	}
+	c.Voices = parseVoices(voicesJSON)
 	return c, nil
 }
 
 func (s *Store) SaveConfig(c Config) error {
-	_, err := s.db.Exec(`
-INSERT INTO config (id, base, key, model, text_model, voice, sys_prompt, updated_at)
-VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+	voicesJSON, err := json.Marshal(c.Voices)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`
+INSERT INTO config (id, base, key, model, text_model, voice, voices, sys_prompt, updated_at)
+VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
 	base = excluded.base,
 	key = CASE WHEN excluded.key = '' THEN config.key ELSE excluded.key END,
 	model = excluded.model,
 	text_model = excluded.text_model,
 	voice = excluded.voice,
+	voices = CASE WHEN excluded.voices = 'null' THEN config.voices ELSE excluded.voices END,
 	sys_prompt = excluded.sys_prompt,
 	updated_at = excluded.updated_at`,
-		c.Base, c.Key, c.Model, c.TextModel, c.Voice, c.SysPrompt, time.Now().Unix())
+		c.Base, c.Key, c.Model, c.TextModel, c.Voice, string(voicesJSON), c.SysPrompt, time.Now().Unix())
 	return err
+}
+
+// parseVoices 容错解析 voices JSON 列：空或非法时回退默认列表。
+func parseVoices(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "[]" || s == "null" {
+		return defaultVoices
+	}
+	var v []string
+	if err := json.Unmarshal([]byte(s), &v); err != nil || len(v) == 0 {
+		return defaultVoices
+	}
+	return v
 }
 
 func (s *Store) AddUsage(u UsageRow) error {
